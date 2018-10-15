@@ -17,8 +17,6 @@ Axiom PTRSZ_def: PTRSZ = 16.
 
 (* The size of memory. *)
 Definition MEMSZ := Nat.shiftl 1 PTRSZ.
-(* # of twin blocks. *)
-Definition TWINCNT := 3.
 (* A maximum value of alignment that will guarantee
    success of machine-level memory access in this target.
    A pointer returned by malloc() will have this alignment. *)
@@ -760,26 +758,17 @@ End Byte.
 
 Module MemBlock.
 
-(* Block := (t, r, n, a, c, P)
-   Note that |P| == twin# is kept as invariant. *)
+(* Block := (t, r, n, a, c, p) *)
 Structure t := mk
   {
     bt: blockty; r:time * option time;
     n: nat; a: nat; c:list (Byte.t);
-    P: list nat
+    p: nat
   }.
 
-(* Returns (start_ofs, size)s that include all twin blocks. *)
-Definition P_ranges (mb:t):list (nat * nat) :=
-  List.map (fun ofs => (ofs, mb.(n))) mb.(P).
-
-(* Returns integer address of the block. *)
-Definition addr (mb:t): nat :=
-  List.hd 0 mb.(P).
-
-(* Returns (start_ofs, size) of the using one. *)
-Definition P0_range (mb:t): nat * nat :=
-  (addr mb, mb.(n)).
+(* Returns (start_ofs, size). *)
+Definition addr_range (mb:t):nat * nat :=
+  (mb.(p), mb.(n)).
 
 
 (* Well-formendess of a memory block. *)
@@ -792,19 +781,15 @@ Structure wf (mb:t) := mkWf
     (* wf_poslen: There's no zero-size block in the memory.
        In this formalization, malloc(0) returns NULL, so this invariant
        holds. *)
-    wf_poslen: no_empty_range (P_ranges mb) = true;
+    wf_poslen: mb.(n) <> 0;
     (* wf_align: alignment criteria *)
-    wf_align: forall p (HAS:List.In p mb.(P)), Nat.modulo p mb.(a) = 0;
+    wf_align: Nat.modulo mb.(p) mb.(a) = 0;
     (* wf_mem: Note that this is "<", not "<=", because p + n wouldn't
-       be representable in 2^32 bits *)
-    wf_inmem: forall p (HAS:List.In p mb.(P)), p + mb.(n) < MEMSZ;
+       be representable in 2^32 bits otherwise *)
+    wf_inmem: mb.(p) + mb.(n) < MEMSZ;
     (* wf_notnull: block starting offset cannot be 0
        (because this formalization assumes that address space is always 0) *)
-    wf_notnull: forall p (HAS:List.In p mb.(P)), ~ (p = 0);
-    (* all twin blocks are disjoint *)
-    wf_disj: disjoint_ranges (P_ranges mb) = true;
-    (* has correct number of twin blocks. *)
-    wf_twin: List.length mb.(P) = TWINCNT
+    wf_notnull: mb.(p) <> 0
   }.
 
 (* is block t alive? *)
@@ -829,7 +814,7 @@ Definition inbounds (ofs:nat) (mb:t): bool :=
 
 (* start_ofs <= ofs <= start_ofs + block size of mb? *)
 Definition inbounds_abs (ofs':nat) (mb:t): bool :=
-  in_range ofs' (P0_range mb).
+  in_range ofs' (addr_range mb).
 
 (* Get bytes in (offset, offset +len) *)
 Definition bytes (mb:t) (ofs len:nat): list (Byte.t) :=
@@ -840,41 +825,22 @@ Definition set_bytes (mb:t) (ofs:nat) (bytes:list (Byte.t)): t :=
   mk mb.(bt) mb.(r) mb.(n) mb.(a)
      (List.firstn ofs (mb.(c)) ++ bytes ++
       List.skipn (ofs + List.length bytes) mb.(c))
-     mb.(P).
+     mb.(p).
 
 (* Set the end of lifetime if it was alive. *)
 Definition set_lifetime_end (mb:t) (newt:time): option t :=
   if alive mb then
     Some (mk mb.(bt) (mb.(r).(fst), Some newt)
-               mb.(n) mb.(a) mb.(c) mb.(P))
+               mb.(n) mb.(a) mb.(c) mb.(p))
   else None.
 
 (**********************************************
       Lemmas&Theorems about MemBlock.
  **********************************************)
 
-Lemma P_P0_range_lsubseq:
-  forall mb (HWF:wf mb),
-    lsubseq (P_ranges mb) ((P0_range mb)::nil).
-Proof.
-  intros.
-  unfold P_ranges.
-  unfold P0_range.
-  destruct (MemBlock.P mb) as [| P0 Pt] eqn:HP1.
-  { (* cannot be nil. *)
-    assert (List.length (MemBlock.P mb) = 0).
-    { rewrite HP1. reflexivity. }
-    rewrite (MemBlock.wf_twin) in H. inversion H. assumption.
-  }
-  unfold addr.
-  rewrite HP1. simpl.
-  constructor.
-  constructor.
-Qed.
-
 Lemma inbounds_inbounds_abs:
   forall (mb:t) ofs ofs_abs
-         (HABS: ofs_abs = ofs + addr mb),
+         (HABS: ofs_abs = ofs + mb.(p)),
     inbounds ofs mb = inbounds_abs ofs_abs mb.
 Proof.
   intros.
@@ -882,90 +848,38 @@ Proof.
   unfold inbounds_abs.
   rewrite HABS.
   unfold Common.in_range.
-  unfold Ir.MemBlock.P0_range.
-  remember (Ir.MemBlock.addr mb) as addr.
-  remember (Ir.MemBlock.n mb) as n.
+  unfold Ir.MemBlock.addr_range.
   simpl.
-  assert (PeanoNat.Nat.leb addr (ofs + addr) = true).
+  assert (PeanoNat.Nat.leb (p mb) (ofs + (p mb)) = true).
   {
     rewrite PeanoNat.Nat.leb_le.
     apply Plus.le_plus_r.
   }
   rewrite H.
   simpl.
-  rewrite PeanoNat.Nat.add_comm with (n := ofs) (m := addr).
-  remember (PeanoNat.Nat.leb (addr + ofs) (addr + n)) as flag.
-  symmetry in Heqflag.
-  destruct flag.
-  - rewrite PeanoNat.Nat.leb_le in Heqflag.
-    apply Plus.plus_le_reg_l in Heqflag.
-    rewrite PeanoNat.Nat.leb_le.
-    assumption.
-  - rewrite PeanoNat.Nat.leb_nle in Heqflag.
-    rewrite PeanoNat.Nat.leb_nle.
-    intros H'.
-    apply Heqflag.
-    apply Plus.plus_le_compat_l.
-    assumption.
+  rewrite PeanoNat.Nat.add_comm with (n := ofs) (m := p mb).
+  remember (ofs <=? n mb) as x.
+  remember (p mb + ofs <=? p mb + n mb) as y.
+  symmetry in Heqx, Heqy.
+  destruct x; destruct y; try reflexivity;
+    rewrite PeanoNat.Nat.leb_le in *;
+    rewrite PeanoNat.Nat.leb_gt in *; omega.
 Qed.
 
 Lemma inbounds_mod:
   forall mb (HWF:Ir.MemBlock.wf mb) ofs
          (HINB:Ir.MemBlock.inbounds ofs mb = true),
-    (Ir.MemBlock.addr mb + ofs) mod Ir.MEMSZ = Ir.MemBlock.addr mb + ofs.
+    (Ir.MemBlock.p mb + ofs) mod Ir.MEMSZ = Ir.MemBlock.p mb + ofs.
 Proof.
   intros.
   rewrite Nat.mod_small. reflexivity.
   inv HWF.
   unfold Ir.MemBlock.inbounds in HINB.
   rewrite PeanoNat.Nat.leb_le in HINB.
-  eapply Nat.le_lt_trans with (m := Ir.MemBlock.addr mb +Ir.MemBlock.n mb).
+  eapply Nat.le_lt_trans with (m := Ir.MemBlock.p mb +Ir.MemBlock.n mb).
   omega.
   apply wf_inmem0.
-  unfold Ir.MemBlock.addr.
-  destruct (Ir.MemBlock.P mb).
-  simpl in wf_twin0. inv wf_twin0.
-  simpl. 
-  left. reflexivity.
 Qed.
-
-(* Thanks to twin blocks, size of a block cannot equal to or be larger than a half of
-   memory size. *)
-Lemma blocksz_lt:
-  forall mb (HWF:Ir.MemBlock.wf mb),
-    ~ (Ir.MemBlock.n mb >= Nat.shiftl 1 (Ir.PTRSZ - 1)).
-Proof.
-  intros.
-  intros H.
-  inv HWF.
-  unfold Ir.MemBlock.P_ranges in wf_disj0.
-  destruct (Ir.MemBlock.P mb).
-  simpl in wf_twin0. inv wf_twin0.
-  destruct l. simpl in wf_twin0. inv wf_twin0.
-  simpl in wf_disj0.
-  rewrite andb_true_iff in wf_disj0.
-  rewrite andb_true_iff in wf_disj0.
-  rewrite andb_true_iff in wf_disj0.
-  destruct wf_disj0.
-  destruct H0. clear H1. clear H2.
-  unfold disjoint_range in H0.
-  rewrite orb_true_iff in H0.
-  rewrite PeanoNat.Nat.leb_le in H0.
-  rewrite PeanoNat.Nat.leb_le in H0.
-  assert (Ir.MEMSZ = (Nat.shiftl 1 (Ir.PTRSZ - 1)) +
-                     (Nat.shiftl 1 (Ir.PTRSZ - 1))).
-  { unfold MEMSZ. rewrite Ir.PTRSZ_def. reflexivity. }
-  destruct H0.
-  { exploit wf_inmem0.
-    simpl. right. left. reflexivity.
-    intros HH.
-    omega.
-  }
-  { exploit wf_inmem0.
-    simpl. left. reflexivity.
-    intros HH. omega.
-  }
-Qed.  
   
 Lemma inbounds_abs_lt_MEMSZ:
   forall mb i
@@ -979,16 +893,12 @@ Proof.
   rewrite andb_true_iff in HINB.
   destruct HINB.
   rewrite PeanoNat.Nat.leb_le in H0.
-  unfold Ir.MemBlock.P0_range in *.
+  unfold Ir.MemBlock.addr_range in *.
   simpl in *.
   destruct HWF.
   eapply le_lt_trans.
   eassumption.
   apply wf_inmem0.
-  unfold Ir.MemBlock.addr.
-  destruct (Ir.MemBlock.P mb).
-  simpl in wf_twin0. unfold Ir.TWINCNT in wf_twin0. congruence.
-  simpl. left. reflexivity.
 Qed.
 
 Lemma bytes_In_c:
@@ -1011,13 +921,6 @@ Lemma n_pos:
 Proof.
   intros.
   inv HWF.
-  unfold Ir.MemBlock.P_ranges in wf_poslen0.
-  unfold no_empty_range in wf_poslen0.
-  destruct (Ir.MemBlock.P mb).
-  simpl in wf_twin0. inv wf_twin0.
-  simpl in wf_poslen0.
-  rewrite andb_true_iff in wf_poslen0.
-  destruct wf_poslen0. rewrite PeanoNat.Nat.ltb_lt in H.
   omega.
 Qed.
 
@@ -1082,8 +985,8 @@ Qed.
 Lemma inbounds_abs_addr:
   forall (blk:Ir.MemBlock.t) o ofs
          (HABS:Ir.MemBlock.inbounds_abs o blk = true)
-         (HO:o - Ir.MemBlock.addr blk = ofs),
-    o = Ir.MemBlock.addr blk + ofs.
+         (HO:o - Ir.MemBlock.p blk = ofs),
+    o = Ir.MemBlock.p blk + ofs.
 Proof.
   intros.
   rewrite <- HO.
@@ -1099,25 +1002,25 @@ Proof.
   assumption.
 Qed.
 
-Lemma no_empty_range_P_ranges:
+Lemma no_empty_range_addr_ranges:
   forall (mb:t) (HSZ:0 < mb.(n)),
-    no_empty_range (P_ranges mb) = true.
+    no_empty_range (addr_ranges mb) = true.
 Proof.
   intros.
-  unfold P_ranges.
+  unfold addr_ranges.
   induction (P mb).
   - reflexivity.
   - simpl. rewrite <- Nat.ltb_lt in HSZ.
     rewrite HSZ. rewrite IHl. reflexivity.
 Qed.
 
-Lemma P_ranges_nonnil:
+Lemma addr_ranges_nonnil:
   forall mb (HWF:wf mb),
-    P_ranges mb <> [].
+    addr_ranges mb <> [].
 Proof.
   intros.
   inv HWF.
-  unfold P_ranges.
+  unfold addr_ranges.
   intros HH.
   rewrite <- List.length_zero_iff_nil in HH.
   rewrite List.map_length in HH.
@@ -1125,9 +1028,9 @@ Proof.
   congruence.
 Qed.
 
-Lemma P_ranges_no_empty_range:
+Lemma addr_ranges_no_empty_range:
   forall mb (HWF:wf mb),
-    no_empty_range (P_ranges mb) = true.
+    no_empty_range (addr_ranges mb) = true.
 Proof.
   intros.
   inv HWF.
@@ -1139,24 +1042,24 @@ Lemma P0_range_no_empty_range:
     no_empty_range [P0_range mb] = true.
 Proof.
   intros.
-  eapply no_empty_range_lsubseq with (l1 := P_ranges mb).
-  apply P_ranges_no_empty_range.
+  eapply no_empty_range_lsubseq with (l1 := addr_ranges mb).
+  apply addr_ranges_no_empty_range.
   assumption.
   apply P_P0_range_lsubseq.
   assumption.
 Qed.
 
-Lemma P_ranges_hd_P0_range:
+Lemma addr_ranges_hd_P0_range:
   forall mb
     (HWF:Ir.MemBlock.wf mb),
-    List.hd (0, 0) (Ir.MemBlock.P_ranges mb) = Ir.MemBlock.P0_range mb.
+    List.hd (0, 0) (Ir.MemBlock.addr_ranges mb) = Ir.MemBlock.P0_range mb.
 Proof.
   intros.
-  unfold Ir.MemBlock.P_ranges.
+  unfold Ir.MemBlock.addr_ranges.
   unfold Ir.MemBlock.P0_range.
   inv HWF.
   unfold Ir.TWINCNT in *.
-  unfold Ir.MemBlock.addr.
+  unfold Ir.MemBlock.p.
   destruct (Ir.MemBlock.P mb).
   { inv wf_twin0. }
   { reflexivity. }
@@ -1164,11 +1067,11 @@ Qed.
 
 Lemma addr_P_In:
   forall mb (HWF:Ir.MemBlock.wf mb),
-    List.In (Ir.MemBlock.addr mb) (Ir.MemBlock.P mb).
+    List.In (Ir.MemBlock.p mb) (Ir.MemBlock.P mb).
 Proof.
   intros.
   inv HWF.
-  unfold Ir.MemBlock.addr.
+  unfold Ir.MemBlock.p.
   destruct (Ir.MemBlock.P mb).
   simpl in wf_twin0. unfold Ir.TWINCNT in wf_twin0. congruence.
   simpl. left. reflexivity.
@@ -1226,7 +1129,7 @@ Definition zeroofs_block (m:t) (abs_ofs:nat)
   match (inbounds_blocks2 m (abs_ofs::abs_ofs+1::nil)) with
   | nil => None
   | t =>
-    match (List.filter (fun mb => Nat.eqb (MemBlock.addr mb.(snd)) abs_ofs) t) with
+    match (List.filter (fun mb => Nat.eqb (MemBlock.p mb.(snd)) abs_ofs) t) with
     | nil => None
     | h::t' => Some h
     end
@@ -2443,7 +2346,7 @@ Lemma get_free:
          (HFREE:Some m' = Ir.Memory.free m l)
          (HGET: Some blk  = Ir.Memory.get m l0)
          (HGET':Some blk' = Ir.Memory.get m' l0),
-    Ir.MemBlock.addr blk = Ir.MemBlock.addr blk'.
+    Ir.MemBlock.p blk = Ir.MemBlock.p blk'.
 Proof.
   intros.
   assert (Ir.Memory.wf m').
@@ -2460,7 +2363,7 @@ Proof.
     { unfold Ir.MemBlock.set_lifetime_end in Heq2.
       destruct (Ir.MemBlock.alive t0).
       { inv Heq2. inv HGET'. rewrite Heq in HGET.
-        inv HGET. unfold Ir.MemBlock.addr.
+        inv HGET. unfold Ir.MemBlock.p.
         simpl. reflexivity. }
       { congruence. }
     }
@@ -3923,12 +3826,12 @@ Lemma zeroofs_block_addr:
   forall mb bid m (HGET:Ir.Memory.get m bid = Some mb)
          (HWF:Ir.Memory.wf m)
          (HALIVE:Ir.MemBlock.alive mb = true),
-    Ir.Memory.zeroofs_block m (Ir.MemBlock.addr mb) = Some (bid, mb).
+    Ir.Memory.zeroofs_block m (Ir.MemBlock.p mb) = Some (bid, mb).
 Proof.
   intros.
   unfold Ir.Memory.zeroofs_block.
   remember (Ir.Memory.inbounds_blocks2 m
-    [Ir.MemBlock.addr mb; Ir.MemBlock.addr mb + 1]) as blks.
+    [Ir.MemBlock.p mb; Ir.MemBlock.p mb + 1]) as blks.
   symmetry in Heqblks.
   dup Heqblks.
   assert (List.In (bid, mb) blks).
